@@ -160,6 +160,60 @@ final class Cliente
         return $this->solicitar('GET', "/comprobantes/{$id}/cdr")->cuerpo;
     }
 
+    // ── Notas de venta (sin valor fiscal) ─────────────────────────────────
+
+    /**
+     * 201 con la nota ya terminada: no va a SUNAT.
+     *
+     * @param  array<string, mixed>  $nota
+     * @return array<string, mixed>
+     */
+    public function emitirNotaVenta(array $nota, ?string $claveIdempotencia = null): array
+    {
+        return $this->conIdempotencia('POST', '/notas-venta', $nota, $claveIdempotencia);
+    }
+
+    /** @return array<string, mixed> */
+    public function notaVenta(string $id): array
+    {
+        return $this->json('GET', "/notas-venta/{$id}");
+    }
+
+    /**
+     * @param  array<string, scalar>  $filtros
+     * @return array{data: list<array<string, mixed>>, siguiente_cursor: ?string}
+     */
+    public function notasVenta(array $filtros = []): array
+    {
+        /** @var array{data: list<array<string, mixed>>, siguiente_cursor: ?string} */
+        return $this->json('GET', '/notas-venta'.self::query($filtros));
+    }
+
+    /**
+     * La boleta (03) o factura (01) que la sustituye. Sin Idempotency-Key: la
+     * fija la nota, así que reintentar devuelve el mismo comprobante.
+     *
+     * @param  array{tipo_documento: string, serie: string, fecha_emision?: string, cliente?: array<string, string>}  $datos
+     * @return array{nota_venta: array<string, mixed>, comprobante: array<string, mixed>}
+     */
+    public function convertirNotaVenta(string $id, array $datos): array
+    {
+        /** @var array{nota_venta: array<string, mixed>, comprobante: array<string, mixed>} */
+        return $this->json('POST', "/notas-venta/{$id}/convertir", $datos);
+    }
+
+    /** @return array<string, mixed> */
+    public function anularNotaVenta(string $id, string $motivo): array
+    {
+        return $this->json('POST', "/notas-venta/{$id}/anular", ['motivo' => $motivo]);
+    }
+
+    /** @param  'a4'|'ticket'  $formato */
+    public function pdfNotaVenta(string $id, string $formato = 'a4'): string
+    {
+        return $this->solicitar('GET', "/notas-venta/{$id}/pdf?formato={$formato}")->cuerpo;
+    }
+
     // ── Guías, clientes, consumo ──────────────────────────────────────────
 
     /**

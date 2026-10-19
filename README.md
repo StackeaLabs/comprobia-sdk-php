@@ -69,6 +69,10 @@ $comprobia->emitirGuia([...]);
 $comprobia->buscarCliente('ruc', '20100066603');
 $comprobia->consumo('2026-10');
 
+// Nota de venta: sin valor fiscal, no va a SUNAT. Luego, la boleta o factura que la sustituye.
+$nota = $comprobia->emitirNotaVenta(['items' => [['descripcion' => 'Consulta', 'cantidad' => '1', 'precio_unitario' => '80.00']]]);
+$comprobia->convertirNotaVenta($nota['id'], ['tipo_documento' => '03', 'serie' => 'B001']);
+
 // Cualquier otra ruta de la v1:
 $comprobia->json('GET', '/webhooks');
 ```

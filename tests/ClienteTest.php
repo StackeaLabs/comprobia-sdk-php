@@ -123,6 +123,24 @@ final class ClienteTest extends TestCase
         self::assertStringEndsWith('/comprobantes/x/pdf?formato=ticket', $t->peticiones[2]['url']);
     }
 
+    public function test_nota_de_venta_se_emite_con_clave_y_se_convierte_sin_ella(): void
+    {
+        $t = new TransporteDePrueba([
+            TransporteDePrueba::json(201, ['id' => 'n1', 'numero' => 'NV01-1']),
+            TransporteDePrueba::json(202, ['nota_venta' => ['estado' => 'CONVERTIDA'], 'comprobante' => ['numero_completo' => 'B001-1']]),
+        ]);
+        $c = $this->cliente($t);
+
+        $nota = $c->emitirNotaVenta(['items' => []]);
+        $r = $c->convertirNotaVenta((string) $nota['id'], ['tipo_documento' => '03', 'serie' => 'B001']);
+
+        self::assertSame('B001-1', $r['comprobante']['numero_completo']);
+        self::assertSame('https://comprobia.test/api/v1/20123456789/notas-venta', $t->peticiones[0]['url']);
+        self::assertArrayHasKey('Idempotency-Key', $t->peticiones[0]['cabeceras']);
+        self::assertStringEndsWith('/notas-venta/n1/convertir', $t->peticiones[1]['url']);
+        self::assertArrayNotHasKey('Idempotency-Key', $t->peticiones[1]['cabeceras']);
+    }
+
     public function test_anular_lleva_el_motivo_y_su_idempotency_key(): void
     {
         $t = new TransporteDePrueba([TransporteDePrueba::json(202, ['tipo' => 'COMUNICACION_BAJA'])]);
