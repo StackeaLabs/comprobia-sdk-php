@@ -6,17 +6,9 @@ La referencia completa de la API está en <https://comprobia.stackealabs.com/doc
 
 ## Instalar
 
-Todavía no está publicado en Packagist, así que `composer require` a secas no
-lo encuentra. Mientras tanto, pídenos el paquete por soporte, descomprímelo
-junto a tu proyecto e instálalo como repositorio de ruta:
-
 ```bash
-composer config repositories.comprobia path ../comprobia-sdk-php
-composer require stackealabs/comprobia:^0.2
+composer require stackealabs/comprobia
 ```
-
-Si tienes acceso al repositorio git, `composer config repositories.comprobia vcs <url>`
-en lugar de la línea `path`.
 
 ## Emitir
 
