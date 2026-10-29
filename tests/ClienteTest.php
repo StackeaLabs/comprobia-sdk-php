@@ -7,6 +7,7 @@ namespace Comprobia\Tests;
 use Comprobia\Cliente;
 use Comprobia\ErrorDeComprobia;
 use Comprobia\ErrorDeConexion;
+use Comprobia\Partner;
 use Comprobia\Respuesta;
 use PHPUnit\Framework\TestCase;
 
@@ -150,5 +151,68 @@ final class ClienteTest extends TestCase
         self::assertStringEndsWith('/comprobantes/abc/anular', $t->peticiones[0]['url']);
         self::assertSame('{"motivo":"ERROR EN EL RUC"}', $t->peticiones[0]['cuerpo']);
         self::assertSame('anular-abc', $t->peticiones[0]['cabeceras']['Idempotency-Key']);
+    }
+
+    public function test_un_post_sin_idempotency_key_no_se_reintenta_ante_un_corte_ni_un_5xx(): void
+    {
+        $corte = new TransporteDePrueba([null, TransporteDePrueba::json(201, ['id' => 'w'])]);
+
+        try {
+            $this->cliente($corte)->json('POST', '/webhooks', ['url' => 'https://x.pe/h']);
+            self::fail('Debía lanzar.');
+        } catch (ErrorDeConexion) {
+        }
+        self::assertCount(1, $corte->peticiones);
+
+        $caido = new TransporteDePrueba([TransporteDePrueba::json(503, ['code' => 'INTERNAL_ERROR', 'message' => 'x'])]);
+
+        try {
+            $this->cliente($caido)->json('POST', '/exportaciones');
+            self::fail('Debía lanzar.');
+        } catch (ErrorDeComprobia) {
+        }
+        self::assertCount(1, $caido->peticiones);
+    }
+
+    public function test_un_post_sin_idempotency_key_si_se_reintenta_ante_un_429(): void
+    {
+        $t = new TransporteDePrueba([
+            TransporteDePrueba::json(429, ['code' => 'RATE_LIMITED', 'message' => 'x']),
+            TransporteDePrueba::json(201, ['id' => 'w']),
+        ]);
+
+        self::assertSame('w', $this->cliente($t)->json('POST', '/webhooks', ['url' => 'https://x.pe/h'])['id']);
+        self::assertCount(2, $t->peticiones);
+    }
+
+    public function test_buscar_cliente_manda_el_documento_en_el_cuerpo_y_se_reintenta(): void
+    {
+        $t = new TransporteDePrueba([null, TransporteDePrueba::json(200, ['razon_social' => 'ANA'])]);
+
+        self::assertSame('ANA', $this->cliente($t)->buscarCliente('dni', '45678912')['razon_social']);
+        self::assertSame('https://comprobia.test/api/v1/20123456789/clientes/buscar', $t->peticiones[1]['url']);
+        self::assertSame('{"tipo":"dni","numero":"45678912"}', $t->peticiones[1]['cuerpo']);
+    }
+
+    public function test_peticion_llega_a_rutas_fuera_del_ruc(): void
+    {
+        $t = new TransporteDePrueba([TransporteDePrueba::json(200, ['codigo' => '03'])]);
+
+        $this->cliente($t)->peticion('GET', '/api/v1/catalogos/03');
+
+        self::assertSame('https://comprobia.test/api/v1/catalogos/03', $t->peticiones[0]['url']);
+    }
+
+    public function test_partner_lista_su_cartera_y_emite_con_su_clave(): void
+    {
+        $t = new TransporteDePrueba([TransporteDePrueba::json(200, ['data' => []]), TransporteDePrueba::json(202, ['numero_completo' => 'F001-1'])]);
+        $partner = new Partner('cmpp_beta_y', 'https://comprobia.test', $t, static function (float $s): void {});
+
+        $partner->emisores();
+        $partner->emisor('20100066603')->emitir(['serie' => 'F001'], 'v-1');
+
+        self::assertSame('https://comprobia.test/api/partner/v1/emisores', $t->peticiones[0]['url']);
+        self::assertSame('https://comprobia.test/api/v1/20100066603/comprobantes', $t->peticiones[1]['url']);
+        self::assertSame('Bearer cmpp_beta_y', $t->peticiones[1]['cabeceras']['Authorization']);
     }
 }

@@ -6,5 +6,5 @@ namespace Comprobia;
 
 final class Version
 {
-    public const ACTUAL = '0.1.0';
+    public const ACTUAL = '0.2.0';
 }

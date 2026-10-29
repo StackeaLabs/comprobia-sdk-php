@@ -20,7 +20,10 @@ use Generator;
  *   que un comprobante nunca sale dos veces. Para reintentar tú más tarde,
  *   guarda la tuya (por ejemplo, el id de la venta) y pásala.
  * - **Reintentos**: hasta 3 intentos ante un corte de red, un 5xx o un 429 (con
- *   su `Retry-After`). Un 4xx que no es 429 no se reintenta: hay que corregir.
+ *   su `Retry-After`), pero SÓLO donde repetir no duplica nada: lecturas y lo
+ *   que lleva `Idempotency-Key`. Un POST sin clave (crear un webhook, rotar su
+ *   secreto, pedir una exportación) no se repite ante un corte o un 5xx. El
+ *   429 sí, siempre: no se procesó. Un 4xx que no es 429 no se reintenta.
  * - **Errores**: cualquier respuesta que no sea 2xx lanza ErrorDeComprobia con
  *   el `code` estable, el `request_id` y el detalle por campo.
  *
@@ -31,25 +34,24 @@ final class Cliente
 {
     public const BASE = 'https://comprobia.stackealabs.com';
 
-    private const INTENTOS = 3;
-
-    private readonly Transporte $transporte;
-
-    /** @var Closure(float): void */
-    private readonly Closure $esperar;
+    private readonly Peticiones $peticiones;
 
     /** @param  (Closure(float): void)|null  $esperar  para los tests; por defecto, usleep */
     public function __construct(
-        #[\SensitiveParameter] private readonly string $clave,
+        #[\SensitiveParameter] string $clave,
         private readonly string $ruc,
-        private readonly string $base = self::BASE,
+        string $base = self::BASE,
         ?Transporte $transporte = null,
         ?Closure $esperar = null,
     ) {
-        $this->transporte = $transporte ?? new TransporteCurl;
-        $this->esperar = $esperar ?? static function (float $segundos): void {
-            usleep((int) ($segundos * 1_000_000));
-        };
+        $this->peticiones = new Peticiones(
+            $clave,
+            $base,
+            $transporte ?? new TransporteCurl,
+            $esperar ?? static function (float $segundos): void {
+                usleep((int) ($segundos * 1_000_000));
+            },
+        );
     }
 
     // ── Comprobantes ──────────────────────────────────────────────────────
@@ -84,7 +86,8 @@ final class Cliente
      */
     public function vistaPrevia(array $comprobante): string
     {
-        return $this->solicitar('POST', '/comprobantes/vista-previa', $comprobante)->cuerpo;
+        // No cambia nada: se puede repetir.
+        return $this->solicitar('POST', '/comprobantes/vista-previa', $comprobante, [], true)->cuerpo;
     }
 
     /** @return array<string, mixed> */
@@ -138,10 +141,14 @@ final class Cliente
         return $this->conIdempotencia('POST', "/comprobantes/{$id}/anular", ['motivo' => $motivo], $claveIdempotencia);
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * Reenvía los mismos bytes: repetirlo no hace otro comprobante, así que se reintenta.
+     *
+     * @return array<string, mixed>
+     */
     public function reenviar(string $id): array
     {
-        return $this->json('POST', "/comprobantes/{$id}/reenviar");
+        return $this->json('POST', "/comprobantes/{$id}/reenviar", null, [], true);
     }
 
     /** @param  'a4'|'a5'|'ticket'|'ticket58'|'ticket50'  $formato */
@@ -199,7 +206,7 @@ final class Cliente
     public function convertirNotaVenta(string $id, array $datos): array
     {
         /** @var array{nota_venta: array<string, mixed>, comprobante: array<string, mixed>} */
-        return $this->json('POST', "/notas-venta/{$id}/convertir", $datos);
+        return $this->json('POST', "/notas-venta/{$id}/convertir", $datos, [], true);
     }
 
     /** @return array<string, mixed> */
@@ -233,13 +240,15 @@ final class Cliente
 
     /**
      * La ficha de un RUC o DNI para autocompletar (no rechaza nada: avisa).
+     * El documento va en el cuerpo, no en la URL: un DNI no queda en ningún
+     * registro de acceso. Es una lectura, así que se reintenta.
      *
      * @param  'ruc'|'dni'  $tipo
      * @return array<string, mixed>
      */
     public function buscarCliente(string $tipo, string $numero): array
     {
-        return $this->json('GET', "/clientes/{$tipo}/{$numero}");
+        return $this->json('POST', '/clientes/buscar', ['tipo' => $tipo, 'numero' => $numero], [], true);
     }
 
     /** @return array<string, mixed> */
@@ -258,57 +267,40 @@ final class Cliente
      * @param  array<string, string>  $cabeceras
      * @return array<string, mixed>
      */
-    public function json(string $metodo, string $ruta, ?array $cuerpo = null, array $cabeceras = []): array
+    public function json(string $metodo, string $ruta, ?array $cuerpo = null, array $cabeceras = [], bool $reintentable = false): array
     {
-        return $this->solicitar($metodo, $ruta, $cuerpo, $cabeceras)->json();
+        return $this->solicitar($metodo, $ruta, $cuerpo, $cabeceras, $reintentable)->json();
     }
 
     /**
+     * Relativa a `/api/v1/{ruc}`. `$reintentable` en un POST que no cambia nada
+     * (una búsqueda): las lecturas y lo que lleva `Idempotency-Key` se
+     * reintentan siempre.
+     *
      * @param  array<string, mixed>|null  $cuerpo
      * @param  array<string, string>  $cabeceras
      *
      * @throws ErrorDeComprobia
      * @throws ErrorDeConexion
      */
-    public function solicitar(string $metodo, string $ruta, ?array $cuerpo = null, array $cabeceras = []): Respuesta
+    public function solicitar(string $metodo, string $ruta, ?array $cuerpo = null, array $cabeceras = [], bool $reintentable = false): Respuesta
     {
-        $url = rtrim($this->base, '/')."/api/v1/{$this->ruc}".$ruta;
-        $cabeceras = [
-            'Authorization' => "Bearer {$this->clave}",
-            'Accept' => 'application/json',
-            'User-Agent' => 'comprobia-php/'.Version::ACTUAL,
-            ...($cuerpo === null ? [] : ['Content-Type' => 'application/json']),
-            ...$cabeceras,
-        ];
-        $json = $cuerpo === null ? null : json_encode($cuerpo, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        return $this->peticion($metodo, "/api/v1/{$this->ruc}".$ruta, $cuerpo, $cabeceras, $reintentable);
+    }
 
-        for ($intento = 1; ; $intento++) {
-            try {
-                $respuesta = $this->transporte->enviar($metodo, $url, $cabeceras, $json);
-            } catch (ErrorDeConexion $e) {
-                if ($intento >= self::INTENTOS) {
-                    $e->claveIdempotencia = $cabeceras['Idempotency-Key'] ?? null;
-
-                    throw $e;
-                }
-
-                ($this->esperar)(self::espera($intento, null));
-
-                continue;
-            }
-
-            if ($respuesta->estado < 400) {
-                return $respuesta;
-            }
-
-            $reintentable = $respuesta->estado === 429 || $respuesta->estado >= 500;
-
-            if (! $reintentable || $intento >= self::INTENTOS) {
-                throw ErrorDeComprobia::desde($respuesta);
-            }
-
-            ($this->esperar)(self::espera($intento, $respuesta->cabecera('Retry-After')));
-        }
+    /**
+     * Cualquier ruta del servicio, desde la raíz: `/api/v1/catalogos/03`,
+     * `/api/v1/health`.
+     *
+     * @param  array<string, mixed>|null  $cuerpo
+     * @param  array<string, string>  $cabeceras
+     *
+     * @throws ErrorDeComprobia
+     * @throws ErrorDeConexion
+     */
+    public function peticion(string $metodo, string $rutaAbsoluta, ?array $cuerpo = null, array $cabeceras = [], bool $reintentable = false): Respuesta
+    {
+        return $this->peticiones->enviar($metodo, $rutaAbsoluta, $cuerpo, $cabeceras, $reintentable);
     }
 
     /**
@@ -345,16 +337,6 @@ final class Cliente
         $filtros = array_filter($filtros, static fn (mixed $v): bool => $v !== null && $v !== '');
 
         return $filtros === [] ? '' : '?'.http_build_query($filtros);
-    }
-
-    /** 1 s, 2 s… o lo que diga Retry-After, con un techo de 10 s. */
-    private static function espera(int $intento, ?string $retryAfter): float
-    {
-        if ($retryAfter !== null && is_numeric($retryAfter)) {
-            return min((float) $retryAfter, 10.0);
-        }
-
-        return (float) (2 ** ($intento - 1));
     }
 
     private static function claveNueva(): string

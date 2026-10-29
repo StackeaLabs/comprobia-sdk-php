@@ -6,12 +6,17 @@ La referencia completa de la API está en <https://comprobia.stackealabs.com/doc
 
 ## Instalar
 
-Mientras se publica en Packagist, desde el repositorio:
+Todavía no está publicado en Packagist, así que `composer require` a secas no
+lo encuentra. Mientras tanto, pídenos el paquete por soporte, descomprímelo
+junto a tu proyecto e instálalo como repositorio de ruta:
 
 ```bash
-composer config repositories.comprobia vcs <url-del-repositorio>
-composer require stackealabs/comprobia
+composer config repositories.comprobia path ../comprobia-sdk-php
+composer require stackealabs/comprobia:^0.2
 ```
+
+Si tienes acceso al repositorio git, `composer config repositories.comprobia vcs <url>`
+en lugar de la línea `path`.
 
 ## Emitir
 
@@ -50,7 +55,7 @@ try {
 ## Lo que hace por ti
 
 - **Idempotencia.** Cada emisión y anulación lleva una `Idempotency-Key`. Si no pasas una, la genera. Si la red se corta, reintenta con la misma, así que el comprobante no sale dos veces. Para reintentar tú más tarde, usa una tuya, por ejemplo el id de la venta. Si se agotan los intentos, `ErrorDeConexion::$claveIdempotencia` dice cuál reusar.
-- **Reintentos.** Hasta 3 intentos ante un corte de red, un 5xx o un 429 (respetando `Retry-After`). Un 4xx distinto de 429 no se reintenta: hay que corregir el cuerpo.
+- **Reintentos, sólo donde no duplican nada.** Hasta 3 intentos ante un corte de red, un 5xx o un 429 (respetando `Retry-After`) en las lecturas y en todo lo que lleva `Idempotency-Key`. Un `POST` sin clave —crear un webhook, rotar su secreto, pedir una exportación, anular una nota de venta— **no** se reintenta ante un corte o un 5xx, porque el servidor pudo haberlo hecho: comprueba antes de repetirlo. El 429 se reintenta siempre (no se procesó). Un 4xx distinto de 429 no se reintenta: hay que corregir el cuerpo.
 - **Importes como texto.** Todo vuelve como el JSON de la API, con los importes en texto (`"118.00"`). Déjalos así: un `float` pierde céntimos.
 
 ## Lo demás
@@ -66,15 +71,35 @@ $comprobia->xml($id);
 $comprobia->cdr($id);
 $comprobia->emitirLote([...]);    // hasta 50
 $comprobia->emitirGuia([...]);
-$comprobia->buscarCliente('ruc', '20100066603');
+$comprobia->buscarCliente('dni', '45678912');   // el documento va en el cuerpo, no en la URL
 $comprobia->consumo('2026-10');
 
 // Nota de venta: sin valor fiscal, no va a SUNAT. Luego, la boleta o factura que la sustituye.
 $nota = $comprobia->emitirNotaVenta(['items' => [['descripcion' => 'Consulta', 'cantidad' => '1', 'precio_unitario' => '80.00']]]);
 $comprobia->convertirNotaVenta($nota['id'], ['tipo_documento' => '03', 'serie' => 'B001']);
 
-// Cualquier otra ruta de la v1:
+// Cualquier otra ruta de la v1, relativa a /api/v1/{ruc}:
 $comprobia->json('GET', '/webhooks');
+
+// Y cualquier ruta del servicio, desde la raíz:
+$comprobia->peticion('GET', '/api/v1/catalogos/03')->json();
+```
+
+## Partners
+
+Si operas los RUC de tus clientes con una clave de partner (`cmpp_…`):
+
+```php
+use Comprobia\Partner;
+
+$partner = new Partner(getenv('COMPROBIA_CLAVE_PARTNER'));
+
+$partner->emisores();                  // tu cartera
+$partner->consumo('2026-10');
+$partner->json('POST', '/emisores/20100066603/sedes', [/* … */]);
+
+// Para emitir por uno de ellos, el mismo cliente de siempre con tu clave:
+$partner->emisor('20100066603')->emitir([/* … */], 'VENTA-1');
 ```
 
 ## Webhooks
